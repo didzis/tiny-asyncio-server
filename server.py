@@ -415,6 +415,7 @@ if __name__ == '__main__':
     parser.add_argument('--cert', '-c', metavar='CERT', type=str, default='', help='path to SSL certificate')
     parser.add_argument('--key', '-k', metavar='KEY', type=str, default='', help='path to SSL key')
     parser.add_argument('--debug', '-d', action='store_true', help='debug mode')
+    parser.add_argument('--cors', action='store_true', help='add CORS headers (allow all)')
     parser.add_argument('path', type=str, default='.', help='serve files from path')
 
     args = parser.parse_args()
@@ -431,6 +432,16 @@ if __name__ == '__main__':
         response = await call_next(request)
         print('Response headers:', response.headers)
         return response
+
+    if args.cors:
+        @server.middleware()
+        async def cors_middleware(request, call_next):
+            response = await call_next(request)
+            response.headers['Access-Control-Allow-Origin'] = '*'
+            response.headers['Access-Control-Allow-Credentials'] = 'true'
+            response.headers['Access-Control-Allow-Methods'] = '*'
+            response.headers['Access-Control-Allow-Headers'] = '*'
+            return response
 
     @server.handle('GET', ['/{path:path}'])
     async def index_handler(request, path=None):
