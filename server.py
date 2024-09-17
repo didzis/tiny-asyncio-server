@@ -88,6 +88,7 @@ class AsyncServer:
 
     RouteHandler = namedtuple('RouteHandler', 'paths, methods, handler')
     _route_handlers = []
+    _middleware_handlers = []
     next_handler_id = 1
     hostname = ''
 
@@ -114,6 +115,15 @@ class AsyncServer:
                     regex.append(r'(?P<%s>[^/]+)' % (variable,))
         regex.append(parts[-1].replace('*', '.*') + '$')
         return re.compile('^'+''.join(regex), re.I)
+
+    def add_middleware(self, handler):
+        self._middleware_handlers.append(handler)
+
+    def middleware(self):
+        def decorator(fn):
+            self.add_middleware(fn)
+            return fn
+        return decorator
 
     def add_handler(self, methods, paths, handler):
         if type(methods) is str:
@@ -173,10 +183,6 @@ class AsyncServer:
     def _write_response(self, writer, response):
         if self.debug:
             self.log.info(f'[#{response.id}] Sending response to {response.remote_addr}: {response.get_status()}')
-        # TODO: middleware
-        # if cors:
-        #     headers['Access-Control-Allow-Origin'] = '*'
-        #     headers['Access-Control-Allow-Headers'] = '*'
         data = self._prepare_response(response.get_status(), response.headers, response.body)
         writer.write(data)
         # if self.debug:
@@ -218,6 +224,18 @@ class AsyncServer:
         if isinstance(response, dict):
             return Response(**response, id=request.id, remote_addr=request.remote_addr)
         raise Exception('unknown response object: {!r}'.format(response))
+
+    @staticmethod
+    def _make_middleware_caller(middleware, call_next):
+        async def middleware_caller(request):
+            return await middleware(request, call_next)
+        return middleware_caller
+
+    async def _handle_request(self, request):
+        call_next = self._call_handler
+        for middleware in reversed(self._middleware_handlers):
+            call_next = self._make_middleware_caller(middleware, call_next)
+        return await call_next(request)
 
     async def _session(self, reader: StreamReader, writer: StreamWriter, timeout=30):
         remote_addr = ''
@@ -300,7 +318,7 @@ class AsyncServer:
                         request = Request(method=method, path=path, query=qs, headers=headers, content_type=content_type, content_length=content_length, body=body,
                                           remote_addr=remote_addr, id=handler_id)
 
-                        response = await self._call_handler(request)
+                        response = await self._handle_request(request)
 
                         response.id = request.id
                         response.remote_addr = request.remote_addr
