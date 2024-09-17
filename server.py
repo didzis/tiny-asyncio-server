@@ -5,6 +5,7 @@ from asyncio.streams import StreamReader, StreamWriter
 from contextlib import closing
 from urllib.parse import parse_qs
 from collections import namedtuple
+from dataclasses import dataclass
 import os.path
 
 
@@ -42,7 +43,34 @@ class async_timeout:
         task.cancel()
 
 
-Request = namedtuple('Request', 'method, path, query, headers, content_type, content_length, body')
+@dataclass
+class Request:
+    '''Request'''
+    method: str
+    path: str
+    query: dict[str, list[str]]
+    headers: dict[str, str]
+    content_type: str
+    content_length: int | None
+    body: None | str | bytes
+    remote_addr: str
+    id: str
+
+
+@dataclass
+class Response:
+    '''Response'''
+    status: None | str
+    headers: dict[str, str]
+    body: None | str | bytes
+    remote_addr: str
+    id: str
+    status_code: int = 0
+    status_text: str = ''
+    def get_status(self) -> str:
+        if self.status:
+            return self.status
+        return f'{self.status_code} {self.status_text}'
 
 
 class HeaderName(str):
@@ -142,17 +170,54 @@ class AsyncServer:
         response.append('')
         return '\r\n'.join(response).encode('utf8') + body
 
-    def _write_response(self, writer, addr, status='200 OK', headers={}, body=None, handler_id=None):
+    def _write_response(self, writer, response):
         if self.debug:
-            self.log.info(f'[#{handler_id}] Sending response to {addr}: {status}')
+            self.log.info(f'[#{response.id}] Sending response to {response.remote_addr}: {response.get_status()}')
         # TODO: middleware
         # if cors:
         #     headers['Access-Control-Allow-Origin'] = '*'
         #     headers['Access-Control-Allow-Headers'] = '*'
-        data = self._prepare_response(status, headers, body)
+        data = self._prepare_response(response.get_status(), response.headers, response.body)
         writer.write(data)
         # if self.debug:
         #     self.log.debug(f'data sent to {addr}: {data}')
+
+    @staticmethod
+    def _default_headers(content_type=None):
+        headers = {}
+        if content_type is not None:
+            headers['Content-Type'] = content_type
+        return headers
+
+    async def _call_handler(self, request):
+        response = None
+        # match handler
+        for route_handler in self._route_handlers:
+            if request.method not in route_handler.methods:
+                continue
+            for p in route_handler.paths:
+                m = p.match(request.path)
+                if not m:
+                    continue
+                # execute handler
+                if asyncio.iscoroutine(route_handler.handler):
+                    response = await route_handler.handler(request, **m.groupdict())
+                else:
+                    response = route_handler.handler(request, **m.groupdict())
+                if response:
+                    break
+        if not response:
+            return Response(404, 'Not found', self._default_headers(), id=request.id)
+        if asyncio.iscoroutine(response):
+            response = await response
+        # if type(response) in (str, bytes):
+        if type(response) is str:
+            return Response(200, 'OK', self._default_headers('text'), id=request.id)
+        if type(response) is bytes:
+            return Response(200, 'OK', self._default_headers('application/octet-stream'), id=request.id)
+        if isinstance(response, dict):
+            return Response(**response, id=request.id, remote_addr=request.remote_addr)
+        raise Exception('unknown response object: {!r}'.format(response))
 
     async def _session(self, reader: StreamReader, writer: StreamWriter, timeout=30):
         remote_addr = ''
@@ -232,50 +297,19 @@ class AsyncServer:
                         elif content_length > 0:
                             body = await reader.read(content_length)
 
-                        request = Request(method=method, path=path, query=qs, headers=headers, content_type=content_type, content_length=content_length, body=body)
+                        request = Request(method=method, path=path, query=qs, headers=headers, content_type=content_type, content_length=content_length, body=body,
+                                          remote_addr=remote_addr, id=handler_id)
 
-                        response = None
+                        response = await self._call_handler(request)
 
-                        # match handler
-                        for route_handler in self._route_handlers:
-                            if method not in route_handler.methods:
-                                continue
-                            for p in route_handler.paths:
-                                m = p.match(path)
-                                if not m:
-                                    continue
-                                # execute handler
-                                response = route_handler.handler(request, **m.groupdict())
-                                if response:
-                                    break
+                        response.id = request.id
+                        response.remote_addr = request.remote_addr
 
-                        if not response:
-                            self._write_response(writer, remote_addr, '404 Not found', {'Content-Type': 'text'}, body='404 Not found', handler_id=handler_id)
-                            if expect_next_request:
-                                continue
+                        self._write_response(writer, response)
+
+                        if not expect_next_request:
                             break
-
-                        if asyncio.iscoroutine(response):
-                            response = await response
-
-                        if type(response) in (str, bytes):
-                            self._write_response(writer, remote_addr, '200 OK', {'Content-Type': 'text'}, body=response, handler_id=handler_id)
-                            if expect_next_request:
-                                continue
-                            break
-
-                        if isinstance(response, dict):
-                            headers = response.get('headers', {})
-                            status = response.get('status', '200 OK')
-                            body = response.get('body')
-                            if debug:
-                                log.info(f'[#{handler_id}] Writing response {status} {headers} {len(body or "")} bytes')
-                            self._write_response(writer, remote_addr, status, headers, body=body, handler_id=handler_id)
-                            if expect_next_request:
-                                continue
-                            break
-
-                        raise Exception('unknown response object: {!r}'.format(response))
+                        continue
 
                 except Exception as e:
                     tb = traceback.format_exc()
