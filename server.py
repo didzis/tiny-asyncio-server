@@ -425,6 +425,13 @@ if __name__ == '__main__':
 
     basedir = args.path if os.path.isabs(args.path) else os.path.abspath(args.path)
 
+    @server.middleware()
+    async def print_headers_middleware(request, call_next):
+        print('Request headers:', request.headers)
+        response = await call_next(request)
+        print('Response headers:', response.headers)
+        return response
+
     @server.handle('GET', ['/{path:path}'])
     async def index_handler(request, path=None):
         return serve_file(path, basedir=basedir)
