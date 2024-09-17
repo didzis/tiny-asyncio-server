@@ -329,6 +329,8 @@ class AsyncServer:
                             break
                         continue
 
+                except asyncio.IncompleteReadError as e:
+                    log.info(f'[#{handler_id}] Incomplete read from {remote_addr}: {len(e.partial)} bytes read of expected {"unknown" if e.expected is None else e.expected}')
                 except Exception as e:
                     tb = traceback.format_exc()
                     log.debug(f'[#{handler_id}] Exception traceback during handling connection from {remote_addr}:\n{tb}')
